@@ -1,0 +1,49 @@
+<!doctype html>
+<html>
+  <head><meta charset="utf-8"><title>Nano LiveCam</title></head>
+  <body style="margin:0;background:#000;">
+    <video id="v" autoplay playsinline muted controls style="width:100vw;height:100vh;object-fit:contain;"></video>
+    <script>
+      async function play() {
+        const pc = new RTCPeerConnection();
+
+        // Ask for incoming media
+        pc.addTransceiver('video', { direction: 'recvonly' });
+        pc.addTransceiver('audio', { direction: 'recvonly' });
+
+        pc.ontrack = (ev) => { document.getElementById('v').srcObject = ev.streams[0]; };
+
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+
+        // Wait until ICE gathering completes so we send a full SDP (no trickle)
+        await new Promise((resolve) => {
+          if (pc.iceGatheringState === 'complete') return resolve();
+          pc.addEventListener('icegatheringstatechange', () => {
+            if (pc.iceGatheringState === 'complete') resolve();
+          });
+        });
+
+        const sdp = pc.localDescription.sdp;
+
+        // Try path-style first, then query-style
+        let resp = await fetch('http://192.168.7.166:8889/live/cam/whep', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/sdp' },
+          body: sdp
+        });
+        if (!resp.ok) {
+          resp = await fetch('http://192.168.7.166:8889/whep?path=live/cam', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/sdp' },
+            body: sdp
+          });
+        }
+
+        const answerSdp = await resp.text();
+        await pc.setRemoteDescription({ type: 'answer', sdp: answerSdp });
+      }
+      play().catch(console.error);
+    </script>
+  </body>
+</html>
