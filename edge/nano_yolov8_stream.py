@@ -1,3 +1,8 @@
+# # CONFIG
+# RTSP_IN = "rtsp://192.168.7.166:8554/live/cam"      # your existing camera stream from MediaMTX
+# RTMP_OUT = "rtmp://192.168.7.166:1935/live/det"     # annotated stream back to MediaMTX
+
+
 import os
 import sys
 import subprocess as sp
@@ -7,25 +12,30 @@ import numpy as np
 import torch
 from ultralytics import YOLO
 
-# CONFIG
-RTSP_IN = "rtsp://192.168.7.166:8554/live/cam"      # your existing camera stream from MediaMTX
-RTMP_OUT = "rtmp://192.168.7.166:1935/live/det"     # annotated stream back to MediaMTX
-IMGSZ = 640                                         # inference size
-OUT_W, OUT_H = 640, 360                             # output stream size to keep CPU load low
-FPS = 15                                            # lower if Nano struggles
+# INPUT (from MediaMTX CSI camera stream)
+RTSP_IN = "rtsp://192.168.7.166:8554/live/cam?rtsp_transport=tcp"
+
+# OUTPUT (to MediaMTX as RTMP, will appear at /live/det)
+RTMP_OUT = "rtmp://192.168.7.166:1935/live/det"
+
+# Params
+IMGSZ = 640
+OUT_W, OUT_H = 640, 360
+FPS = 15
 CONF_THRES = 0.25
 
-# Model load (pretrained small model)
+# Load YOLO model from your models folder
+MODEL_PATH = os.path.expanduser("~/models/yolov8n.pt")
 device = "cuda:0" if torch.cuda.is_available() else "cpu"
-model = YOLO("yolov8n.pt")  # Ultralytics will download if not present
+model = YOLO(MODEL_PATH)
 
-# Open input stream (via OpenCV + FFMPEG)
+# Open input RTSP stream
 cap = cv2.VideoCapture(RTSP_IN, cv2.CAP_FFMPEG)
 if not cap.isOpened():
-    print("Failed to open input RTSP. Check MediaMTX RTSP and path.")
+    print("❌ Failed to open RTSP stream:", RTSP_IN)
     sys.exit(1)
 
-# Prepare ffmpeg process to push annotated frames to MediaMTX as RTMP
+# Prepare FFmpeg pipeline for RTMP push
 ffmpeg_cmd = [
     "ffmpeg",
     "-loglevel", "error",
@@ -34,7 +44,7 @@ ffmpeg_cmd = [
     "-pix_fmt", "bgr24",
     "-s", f"{OUT_W}x{OUT_H}",
     "-r", str(FPS),
-    "-i", "-",                         # stdin
+    "-i", "-",  # stdin
     "-c:v", "libx264",
     "-preset", "veryfast",
     "-tune", "zerolatency",
@@ -52,30 +62,23 @@ def draw_boxes(frame, boxes, scores, classes):
         cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
         label = f"{names[int(c)]} {float(s):.2f}"
         cv2.putText(frame, label, (x1, max(y1 - 5, 10)),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (10, 10, 10), 2, cv2.LINE_AA)
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (10, 10, 10), 2)
         cv2.putText(frame, label, (x1, max(y1 - 5, 10)),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (240, 240, 240), 1, cv2.LINE_AA)
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (240, 240, 240), 1)
     return frame
 
-# Warmup a blank frame to compile kernels
-dummy = np.zeros((OUT_H, OUT_W, 3), dtype=np.uint8)
-_ = model.predict(dummy, imgsz=IMGSZ, device=device, verbose=False)
-
-print("Running. Press Ctrl+C to stop.")
+print("✅ Starting detection stream... Press Ctrl+C to stop.")
 try:
     frame_interval = 1.0 / FPS
     last_t = 0.0
     while True:
         ok, frame = cap.read()
         if not ok:
-            # brief backoff and retry
             time.sleep(0.1)
             continue
 
-        # Resize for speed and consistent encoder input
-        frame = cv2.resize(frame, (OUT_W, OUT_H), interpolation=cv2.INTER_LINEAR)
+        frame = cv2.resize(frame, (OUT_W, OUT_H))
 
-        # Inference
         results = model.predict(frame, imgsz=IMGSZ, device=device, conf=CONF_THRES, verbose=False)
         r = results[0]
         if r.boxes is not None and len(r.boxes) > 0:
@@ -84,18 +87,18 @@ try:
             cls = r.boxes.cls.detach().cpu().numpy()
             frame = draw_boxes(frame, xyxy, conf, cls)
 
-        # Rate control
+        # Control FPS
         now = time.time()
         sleep = frame_interval - (now - last_t)
         if sleep > 0:
             time.sleep(sleep)
         last_t = time.time()
 
-        # Write to ffmpeg stdin
+        # Send frame to ffmpeg
         try:
             ffmpeg.stdin.write(frame.tobytes())
         except BrokenPipeError:
-            print("FFmpeg pipe closed. Exiting.")
+            print("❌ FFmpeg pipe closed. Exiting.")
             break
 
 except KeyboardInterrupt:
@@ -107,4 +110,4 @@ finally:
     except Exception:
         pass
     ffmpeg.wait(timeout=2)
-    print("Stopped.")
+    print("🛑 Stopped.")
