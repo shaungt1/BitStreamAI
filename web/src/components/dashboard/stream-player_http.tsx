@@ -8,17 +8,17 @@ import { Skeleton } from "@/components/ui/skeleton"
 import { AlertCircle, Play, Square, RotateCcw } from "lucide-react"
 import { Alert, AlertDescription } from "@/components/ui/alert"
 
-interface StreamPlayerProps {
+interface StreamPlayerHTTPProps {
   streamUrl?: string
   className?: string
   title?: string
 }
 
-export function StreamPlayer({ 
+export function StreamPlayerHTTP({ 
   streamUrl = "http://192.168.7.166:8889/live/cam/whep",
   className,
   title = "CSI Camera Stream"
-}: StreamPlayerProps) {
+}: StreamPlayerHTTPProps) {
   const videoRef = React.useRef<HTMLVideoElement>(null)
   const pcRef = React.useRef<RTCPeerConnection | null>(null)
   const [isConnecting, setIsConnecting] = React.useState(false)
@@ -27,35 +27,6 @@ export function StreamPlayer({
   const [latency, setLatency] = React.useState<number | null>(null)
   // inside your StreamPlayer component:
   const canvasRef = React.useRef<HTMLCanvasElement>(null);
-
-
-  
-  React.useEffect(() => {
-    let ws: WebSocket | null = null;
-    function draw(boxes: any[]) {
-      const v = videoRef.current, c = canvasRef.current;
-      if (!v || !c) return;
-      c.width = v.clientWidth; c.height = v.clientHeight;
-      const ctx = c.getContext("2d"); if (!ctx) return;
-      ctx.clearRect(0,0,c.width,c.height);
-      boxes.forEach(b => {
-        const x1 = b.x1 * c.width, y1 = b.y1 * c.height;
-        const x2 = b.x2 * c.width, y2 = b.y2 * c.height;
-        ctx.strokeStyle = "lime"; ctx.lineWidth = 2;
-        ctx.strokeRect(x1,y1,x2-x1,y2-y1);
-        ctx.font = "12px sans-serif"; ctx.fillStyle = "white";
-        ctx.strokeStyle = "black"; ctx.lineWidth = 3;
-        const txt = `${b.label} ${b.conf.toFixed(2)}`;
-        ctx.strokeText(txt, x1+3, y1-3); ctx.fillText(txt, x1+3, y1-3);
-      });
-    }
-    ws = new WebSocket("ws://192.168.7.166:8765");
-    ws.onmessage = e => {
-      const msg = JSON.parse(e.data);
-      draw(msg.detections || []);
-    };
-    return () => { if (ws) ws.close(); };
-  }, []);
 
 
 
@@ -200,7 +171,7 @@ export function StreamPlayer({
             className="w-full h-full object-contain"
             style={{ display: isConnected ? 'block' : 'none' }}
           />
-         <canvas ref={canvasRef} className="absolute inset-0 pointer-events-none" />
+
           {!isConnected && !isConnecting && (
             <div className="absolute inset-0 flex items-center justify-center text-white">
               <div className="text-center">

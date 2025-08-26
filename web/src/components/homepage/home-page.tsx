@@ -4,29 +4,28 @@ import * as React from "react"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
-import { Progress } from "@/components/ui/progress"
-import { Separator } from "@/components/ui/separator"
+import { Input } from "@/components/ui/input"
+import { Label } from "@/components/ui/label"
 import { StreamPlayer } from "@/components/dashboard/stream-player"
+import { MultiStreamPlayer } from "@/components/dashboard/multi-stream-player"
+import { SideBySideStreamPlayer } from "@/components/dashboard/side-by-side-stream-player"
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
+import { StreamSource } from "@/types/stream"
+import { loadStreamsFromStorage, saveStreamsToStorage, addStreamSource } from "@/config/streams"
 import {
-  Accordion,
-  AccordionContent,
-  AccordionItem,
-  AccordionTrigger,
-} from "@/components/ui/accordion"
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+} from "@/components/ui/dialog"
 import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table"
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu"
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select"
 import {
   Video,
   Eye,
@@ -34,314 +33,343 @@ import {
   Activity,
   Plus,
   Settings,
-  Play,
-  AlertTriangle,
   CheckCircle,
-  Clock,
-  Cpu,
-  MoreHorizontal,
+  Trash2,
+  Monitor,
+  Grid3X3,
+  Grid2X2,
 } from "lucide-react"
 
-interface StreamHealthCardProps {
-  className?: string
-}
-
-function StreamHealthCard({ className }: StreamHealthCardProps) {
-  const streams = [
-    { id: "camera01", name: "Main Entrance", status: "up", fps: 30 },
-    { id: "camera02", name: "Loading Dock", status: "up", fps: 28 },
-    { id: "camera03", name: "Parking Lot", status: "degraded", fps: 15 },
-    { id: "camera04", name: "Server Room", status: "down", fps: 0 },
-  ]
-
-  return (
-    <Card className={className}>
-      <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-        <CardTitle className="text-base font-medium">Stream Health</CardTitle>
-        <Video className="h-4 w-4 text-muted-foreground" />
-      </CardHeader>
-      <CardContent>
-        <div className="space-y-3">
-          {streams.map((stream) => (
-            <div key={stream.id} className="flex items-center justify-between">
-              <div className="flex items-center space-x-2">
-                <div className={`h-2 w-2 rounded-full ${
-                  stream.status === 'up' ? 'bg-green-500' :
-                  stream.status === 'degraded' ? 'bg-yellow-500' : 'bg-red-500'
-                }`} />
-                <span className="text-sm font-medium">{stream.name}</span>
-              </div>
-              <div className="flex items-center space-x-2">
-                <span className="text-xs text-muted-foreground">{stream.fps} FPS</span>
-                <DropdownMenu>
-                  <DropdownMenuTrigger asChild>
-                    <Button variant="ghost" size="sm" className="h-6 w-6 p-0">
-                      <MoreHorizontal className="h-3 w-3" />
-                    </Button>
-                  </DropdownMenuTrigger>
-                  <DropdownMenuContent align="end">
-                    <DropdownMenuItem>Open Viewer</DropdownMenuItem>
-                    <DropdownMenuItem>Restart Stream</DropdownMenuItem>
-                    <DropdownMenuItem>Configure</DropdownMenuItem>
-                  </DropdownMenuContent>
-                </DropdownMenu>
-              </div>
-            </div>
-          ))}
-        </div>
-      </CardContent>
-    </Card>
-  )
-}
-
-function YoloPipelineCard({ className }: { className?: string }) {
-  return (
-    <Card className={className}>
-      <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-        <CardTitle className="text-base font-medium">YOLO-112 Pipeline</CardTitle>
-        <Eye className="h-4 w-4 text-muted-foreground" />
-      </CardHeader>
-      <CardContent className="space-y-4">
-        <div className="grid grid-cols-2 gap-4">
-          <div>
-            <div className="text-2xl font-bold">847</div>
-            <p className="text-xs text-muted-foreground">Objects/min</p>
-          </div>
-          <div>
-            <div className="text-2xl font-bold">28.5</div>
-            <p className="text-xs text-muted-foreground">Avg FPS</p>
-          </div>
-        </div>
-        <div className="space-y-2">
-          <div className="flex justify-between text-sm">
-            <span>GPU Utilization</span>
-            <span>67%</span>
-          </div>
-          <Progress value={67} className="h-2" />
-        </div>
-        <div className="space-y-2">
-          <div className="flex justify-between text-sm">
-            <span>Queue Depth</span>
-            <span>12 frames</span>
-          </div>
-          <Progress value={24} className="h-2" />
-        </div>
-        <div className="text-xs text-muted-foreground">
-          Last detection: 2 seconds ago
-        </div>
-      </CardContent>
-    </Card>
-  )
-}
-
-function LLMFeedsCard({ className }: { className?: string }) {
-  const models = [
-    { name: "GPT-4 Vision", status: "active", latency: 1200, tokens: 45 },
-    { name: "Claude-3 Opus", status: "active", latency: 890, tokens: 32 },
-    { name: "Gemini Pro", status: "overloaded", latency: 3400, tokens: 18 },
-  ]
-
-  return (
-    <Card className={className}>
-      <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-        <CardTitle className="text-base font-medium">LLM Feeds</CardTitle>
-        <Brain className="h-4 w-4 text-muted-foreground" />
-      </CardHeader>
-      <CardContent>
-        <Accordion type="single" collapsible>
-          <AccordionItem value="models" className="border-none">
-            <AccordionTrigger className="py-2 text-sm">
-              Active Models ({models.length})
-            </AccordionTrigger>
-            <AccordionContent className="space-y-3">
-              {models.map((model) => (
-                <div key={model.name} className="flex items-center justify-between">
-                  <div className="space-y-1">
-                    <div className="flex items-center space-x-2">
-                      <Badge 
-                        variant={model.status === 'active' ? 'default' : 'destructive'}
-                        className="text-xs"
-                      >
-                        {model.status}
-                      </Badge>
-                      <span className="text-sm font-medium">{model.name}</span>
-                    </div>
-                    <div className="text-xs text-muted-foreground">
-                      {model.latency}ms • {model.tokens} tok/s
-                    </div>
-                  </div>
-                </div>
-              ))}
-            </AccordionContent>
-          </AccordionItem>
-        </Accordion>
-      </CardContent>
-    </Card>
-  )
-}
-
-function RecentAlertsCard({ className }: { className?: string }) {
-  const alerts = [
-    { id: 1, time: "2 min ago", type: "detection", message: "Person detected in restricted area", severity: "high" },
-    { id: 2, time: "5 min ago", type: "system", message: "Camera03 FPS dropped below threshold", severity: "medium" },
-    { id: 3, time: "12 min ago", type: "detection", message: "Vehicle parked in loading zone", severity: "low" },
-  ]
-
-  return (
-    <Card className={className}>
-      <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-        <CardTitle className="text-base font-medium">Recent Alerts</CardTitle>
-        <AlertTriangle className="h-4 w-4 text-muted-foreground" />
-      </CardHeader>
-      <CardContent>
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead className="text-xs">Time</TableHead>
-              <TableHead className="text-xs">Alert</TableHead>
-              <TableHead className="text-xs">Severity</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {alerts.map((alert) => (
-              <TableRow key={alert.id} className="cursor-pointer hover:bg-muted/50">
-                <TableCell className="text-xs text-muted-foreground">
-                  {alert.time}
-                </TableCell>
-                <TableCell className="text-xs">
-                  {alert.message}
-                </TableCell>
-                <TableCell>
-                  <Badge 
-                    variant={
-                      alert.severity === 'high' ? 'destructive' :
-                      alert.severity === 'medium' ? 'default' : 'secondary'
-                    }
-                    className="text-xs"
-                  >
-                    {alert.severity}
-                  </Badge>
-                </TableCell>
-              </TableRow>
-            ))}
-          </TableBody>
-        </Table>
-      </CardContent>
-    </Card>
-  )
-}
-
-function QuickActionsCard({ className }: { className?: string }) {
-  return (
-    <Card className={className}>
-      <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-        <CardTitle className="text-base font-medium">Quick Actions</CardTitle>
-        <Activity className="h-4 w-4 text-muted-foreground" />
-      </CardHeader>
-      <CardContent className="space-y-3">
-        <Button className="w-full justify-start" variant="outline">
-          <Plus className="mr-2 h-4 w-4" />
-          Add Stream
-        </Button>
-        <Button className="w-full justify-start" variant="outline">
-          <Eye className="mr-2 h-4 w-4" />
-          Enable YOLO-112
-        </Button>
-        <Button className="w-full justify-start" variant="outline">
-          <Brain className="mr-2 h-4 w-4" />
-          Attach LLM Feed
-        </Button>
-        <Button className="w-full justify-start" variant="outline">
-          <Settings className="mr-2 h-4 w-4" />
-          Open Live Logs
-        </Button>
-      </CardContent>
-    </Card>
-  )
-}
-
 export function HomePage() {
+  // Stream management state
+  const [streams, setStreams] = React.useState<StreamSource[]>([])
+  const [isAddDialogOpen, setIsAddDialogOpen] = React.useState(false)
+  const [newStream, setNewStream] = React.useState({
+    label: "",
+    url: "",
+    description: "",
+    type: "main" as const,
+    protocol: "webrtc" as const,
+    transport: "whep" as const,
+    aiSources: [] as string[]
+  })
+
+  // View state
+  const [activeView, setActiveView] = React.useState("single")
+  const [gridLayout, setGridLayout] = React.useState("2x2")
+
+  // Analytics state
+  const [connectedStreams, setConnectedStreams] = React.useState(0)
+  const [yoloDetections, setYoloDetections] = React.useState(0)
+
+  React.useEffect(() => {
+    const loadedStreams = loadStreamsFromStorage()
+    setStreams(loadedStreams)
+  }, [])
+
+  React.useEffect(() => {
+    saveStreamsToStorage(streams)
+  }, [streams])
+
+  const handleAddStream = () => {
+    if (!newStream.label || !newStream.url) return
+    
+    const stream = addStreamSource({
+      label: newStream.label,
+      url: newStream.url,
+      description: newStream.description,
+      type: newStream.type,
+      protocol: newStream.protocol,
+      transport: newStream.transport,
+      aiSources: newStream.aiSources,
+      aiSourcesCount: newStream.aiSources.length
+    })
+    
+    setStreams(prev => [...prev, stream])
+    setNewStream({ 
+      label: "", 
+      url: "", 
+      description: "", 
+      type: "main", 
+      protocol: "webrtc", 
+      transport: "whep",
+      aiSources: []
+    })
+    setIsAddDialogOpen(false)
+  }
+
+  const removeStream = (id: string) => {
+    setStreams(prev => prev.filter(s => s.id !== id))
+  }
+
   return (
-    <div className="flex-1 space-y-6 p-6">
+    <div className="flex-1 space-y-4 p-6">
       {/* Page Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-3xl font-bold tracking-tight">Dashboard</h1>
+          <h1 className="text-3xl font-bold tracking-tight">BitStream AI Dashboard</h1>
           <p className="text-muted-foreground">
-            Monitor your edge device streams, detections, and AI models in real-time
+            Monitor and analyze video streams from edge devices for healthcare and security applications
           </p>
         </div>
         <div className="flex items-center space-x-2">
           <Badge variant="outline" className="bg-green-50 text-green-700 border-green-200">
             <CheckCircle className="mr-1 h-3 w-3" />
-            All Systems Operational
+            System Online
           </Badge>
         </div>
       </div>
 
-      {/* Live Stream Section */}
-      <div className="grid gap-6 lg:grid-cols-3">
-        <div className="lg:col-span-2">
-          <StreamPlayer 
-            title="Main CSI Camera Feed"
-            className="h-full"
-          />
-        </div>
-        <div className="space-y-6">
-          <StreamHealthCard />
-          <QuickActionsCard />
-        </div>
-      </div>
-
-      {/* Monitoring Cards Grid */}
-      <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-3">
-        <YoloPipelineCard />
-        <LLMFeedsCard />
-        <RecentAlertsCard />
-      </div>
-
-      {/* System Overview */}
+      {/* View Controls Card - Separate from video */}
       <Card>
         <CardHeader>
-          <CardTitle>System Overview</CardTitle>
+          <div className="flex items-center justify-between">
+            <CardTitle className="flex items-center space-x-2">
+              <Monitor className="h-5 w-5" />
+              <span>Stream View Controls</span>
+            </CardTitle>
+            <Dialog open={isAddDialogOpen} onOpenChange={setIsAddDialogOpen}>
+              <DialogTrigger asChild>
+                <Button className="bg-blue-600 hover:bg-blue-700">
+                  <Plus className="h-4 w-4 mr-2" />
+                  Add Stream Source
+                </Button>
+              </DialogTrigger>
+              <DialogContent>
+                <DialogHeader>
+                  <DialogTitle>Add New Stream Source</DialogTitle>
+                </DialogHeader>
+                <div className="space-y-4">
+                  <div>
+                    <Label htmlFor="label">Stream Label</Label>
+                    <Input
+                      id="label"
+                      placeholder="e.g., OR Camera 3"
+                      value={newStream.label}
+                      onChange={(e) => setNewStream(prev => ({ ...prev, label: e.target.value }))}
+                    />
+                  </div>
+                  <div>
+                    <Label htmlFor="url">Stream URL</Label>
+                    <Input
+                      id="url"
+                      placeholder="http://192.168.x.x:8889/live/cam/whep"
+                      value={newStream.url}
+                      onChange={(e) => setNewStream(prev => ({ ...prev, url: e.target.value }))}
+                    />
+                  </div>
+                  <div>
+                    <Label htmlFor="description">Description</Label>
+                    <Input
+                      id="description"
+                      placeholder="Brief description"
+                      value={newStream.description}
+                      onChange={(e) => setNewStream(prev => ({ ...prev, description: e.target.value }))}
+                    />
+                  </div>
+                  <div className="flex justify-end space-x-2">
+                    <Button variant="outline" onClick={() => setIsAddDialogOpen(false)}>
+                      Cancel
+                    </Button>
+                    <Button 
+                      onClick={handleAddStream} 
+                      disabled={!newStream.label || !newStream.url}
+                      className="bg-blue-600 hover:bg-blue-700"
+                    >
+                      Add Stream
+                    </Button>
+                  </div>
+                </div>
+              </DialogContent>
+            </Dialog>
+          </div>
         </CardHeader>
         <CardContent>
-          <div className="grid gap-6 md:grid-cols-4">
-            <div className="space-y-2">
+          <div className="flex items-center space-x-4">
+            <Tabs value={activeView} onValueChange={setActiveView} className="flex-1">
+              <TabsList className="grid w-full grid-cols-3 max-w-md">
+                <TabsTrigger value="single">Single View</TabsTrigger>
+                <TabsTrigger value="multi">Multi-Stream</TabsTrigger>
+                <TabsTrigger value="sidebyside">Side-by-Side</TabsTrigger>
+              </TabsList>
+            </Tabs>
+            
+            {(activeView === "multi" || activeView === "sidebyside") && (
               <div className="flex items-center space-x-2">
-                <Video className="h-4 w-4 text-blue-600" />
-                <span className="text-sm font-medium">Active Streams</span>
+                <Label className="text-sm">Grid:</Label>
+                <Select value={gridLayout} onValueChange={setGridLayout}>
+                  <SelectTrigger className="w-32">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="1x2">
+                      <div className="flex items-center space-x-2">
+                        <Grid2X2 className="h-4 w-4" />
+                        <span>1x2</span>
+                      </div>
+                    </SelectItem>
+                    <SelectItem value="2x2">
+                      <div className="flex items-center space-x-2">
+                        <Grid2X2 className="h-4 w-4" />
+                        <span>2x2</span>
+                      </div>
+                    </SelectItem>
+                    <SelectItem value="2x3">
+                      <div className="flex items-center space-x-2">
+                        <Grid3X3 className="h-4 w-4" />
+                        <span>2x3</span>
+                      </div>
+                    </SelectItem>
+                  </SelectContent>
+                </Select>
               </div>
-              <div className="text-2xl font-bold">3/4</div>
-              <div className="text-xs text-muted-foreground">Cameras online</div>
-            </div>
-            <div className="space-y-2">
-              <div className="flex items-center space-x-2">
-                <Eye className="h-4 w-4 text-green-600" />
-                <span className="text-sm font-medium">YOLO Detections</span>
-              </div>
-              <div className="text-2xl font-bold">1,247</div>
-              <div className="text-xs text-muted-foreground">Today</div>
-            </div>
-            <div className="space-y-2">
-              <div className="flex items-center space-x-2">
-                <Brain className="h-4 w-4 text-purple-600" />
-                <span className="text-sm font-medium">LLM Queries</span>
-              </div>
-              <div className="text-2xl font-bold">89</div>
-              <div className="text-xs text-muted-foreground">Last hour</div>
-            </div>
-            <div className="space-y-2">
-              <div className="flex items-center space-x-2">
-                <Cpu className="h-4 w-4 text-orange-600" />
-                <span className="text-sm font-medium">Edge Devices</span>
-              </div>
-              <div className="text-2xl font-bold">2</div>
-              <div className="text-xs text-muted-foreground">Connected</div>
-            </div>
+            )}
           </div>
         </CardContent>
       </Card>
+
+      {/* Main Content Layout */}
+      <div className="grid gap-6 lg:grid-cols-4">
+        {/* Video Feed Area - Left Side (3/4 width) */}
+        <div className="lg:col-span-3">
+          <Tabs value={activeView} className="w-full">
+            <TabsContent value="single" className="mt-0">
+              <StreamPlayer 
+                title="OR Camera 1"
+                streamUrl="http://192.168.7.166:8889/live/cam/whep"
+                className="w-full"
+              />
+            </TabsContent>
+            
+            <TabsContent value="multi" className="mt-0">
+              <MultiStreamPlayer className="w-full" />
+            </TabsContent>
+            
+            <TabsContent value="sidebyside" className="mt-0">
+              <SideBySideStreamPlayer 
+                className="w-full"
+                defaultStreams={["edge01", "edge02"]}
+              />
+            </TabsContent>
+          </Tabs>
+        </div>
+
+        {/* Right Sidebar */}
+        <div className="lg:col-span-1 space-y-6">
+          {/* Quick Actions - Above Stream Sources */}
+          <Card>
+            <CardHeader>
+              <CardTitle>Quick Actions</CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              <Button className="w-full justify-start bg-blue-600 hover:bg-blue-700">
+                <Eye className="mr-2 h-4 w-4" />
+                Enable YOLO Detection
+              </Button>
+              <Button className="w-full justify-start bg-blue-600 hover:bg-blue-700">
+                <Brain className="mr-2 h-4 w-4" />
+                Configure LLM Analysis
+              </Button>
+              <Button className="w-full justify-start" variant="outline">
+                <Settings className="mr-2 h-4 w-4" />
+                System Settings
+              </Button>
+            </CardContent>
+          </Card>
+
+          {/* Stream Sources */}
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-lg">Stream Sources</CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              {streams.map((stream) => (
+                <div key={stream.id} className="flex items-center justify-between p-3 border rounded-lg">
+                  <div className="flex-1">
+                    <div className="font-medium text-sm">{stream.label}</div>
+                    <div className="text-xs text-muted-foreground truncate">
+                      {stream.url}
+                    </div>
+                    <div className="flex items-center space-x-1 mt-1">
+                      <Badge variant="outline" className="text-xs">
+                        {stream.type === 'detection' ? 'AI Detection' : 'Live Feed'}
+                      </Badge>
+                      {stream.aiSourcesCount && stream.aiSourcesCount > 0 && (
+                        <Badge variant="secondary" className="text-xs">
+                          {stream.aiSourcesCount} AI
+                        </Badge>
+                      )}
+                    </div>
+                  </div>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => removeStream(stream.id)}
+                    className="h-8 w-8 p-0"
+                  >
+                    <Trash2 className="h-4 w-4" />
+                  </Button>
+                </div>
+              ))}
+            </CardContent>
+          </Card>
+        </div>
+      </div>
+
+      {/* System Analytics - Bottom */}
+      <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+            <CardTitle className="text-sm font-medium">Connected Streams</CardTitle>
+            <Video className="h-4 w-4 text-blue-600" />
+          </CardHeader>
+          <CardContent>
+            <div className="text-2xl font-bold">{connectedStreams}</div>
+            <p className="text-xs text-muted-foreground">
+              Active edge devices
+            </p>
+          </CardContent>
+        </Card>
+        
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+            <CardTitle className="text-sm font-medium">YOLO Detections</CardTitle>
+            <Eye className="h-4 w-4 text-green-600" />
+          </CardHeader>
+          <CardContent>
+            <div className="text-2xl font-bold">{yoloDetections}</div>
+            <p className="text-xs text-muted-foreground">
+              Objects detected today
+            </p>
+          </CardContent>
+        </Card>
+        
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+            <CardTitle className="text-sm font-medium">LLM Processing</CardTitle>
+            <Brain className="h-4 w-4 text-purple-600" />
+          </CardHeader>
+          <CardContent>
+            <div className="text-2xl font-bold">Ready</div>
+            <p className="text-xs text-muted-foreground">
+              AI analysis available
+            </p>
+          </CardContent>
+        </Card>
+        
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+            <CardTitle className="text-sm font-medium">System Health</CardTitle>
+            <Activity className="h-4 w-4 text-orange-600" />
+          </CardHeader>
+          <CardContent>
+            <div className="text-2xl font-bold text-green-600">Online</div>
+            <p className="text-xs text-muted-foreground">
+              All systems operational
+            </p>
+          </CardContent>
+        </Card>
+      </div>
     </div>
   )
 }
