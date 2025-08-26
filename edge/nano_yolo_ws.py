@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# edge.nano_yolo_ws.py — Python 3.8 venv friendly (no GStreamer required)
+# nano_yolo_ws.py — Python 3.8 venv friendly (no GStreamer required)
 
 # ===== torchvision + metadata shim (JetPack 4 safe)
 import sys, types, torch
@@ -49,13 +49,21 @@ except Exception:
 # ---- CONFIG (edit RTSP_HOST if needed)
 MODEL_PATH = os.path.expanduser("~/models/yolov8n.pt")
 RTSP_BASE  = "rtsp://192.168.7.166:8554/live/cam"   # no query here
-RTSP_TCP   = RTSP_BASE + "?rtsp_transport=tcp"      # for FFmpeg/OpenCV fallback
+RTSP_TCP   = RTSP_BASE + "?rtsp_transport=tcp"      # force TCP for OpenCV/FFmpeg
 WS_PORT    = 8765
 
 # Conservative defaults for Nano 2GB + SW decode
 IMGSZ        = 256
 CONF         = 0.25
 TARGET_FPS   = 2
+
+# Force FFmpeg/RTSP over TCP + minimal buffering for OpenCV in venv
+os.environ.setdefault(
+    "OPENCV_FFMPEG_CAPTURE_OPTIONS",
+    "rtsp_transport;tcp|max_delay;0|buffer_size;102400|stimeout;2000000|"
+    "analyzeduration;0|probesize;3200|fflags;nobuffer|flags;low_delay|"
+    "reorder_queue_size;0|fpsprobesize;0"
+)
 
 print(f"[init] loading model: {MODEL_PATH}")
 if not os.path.exists(MODEL_PATH):
@@ -67,10 +75,15 @@ def open_capture() -> cv2.VideoCapture:
     print(f"[rtsp] trying OpenCV/FFmpeg (TCP): {RTSP_TCP}")
     cap = cv2.VideoCapture(RTSP_TCP)
     if cap.isOpened():
+        # keep only one buffer so late frames are dropped, not queued
+        try:
+            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        except Exception:
+            pass
         print("[rtsp] capture opened via OpenCV/FFmpeg")
         return cap
 
-    # If your OpenCV has GStreamer built (rare on venv 3.8), we try decodebin as a backup
+    # Optional: if OpenCV has GStreamer compiled in this venv, try decodebin
     if "GStreamer" in cv2.getBuildInformation():
         gst = (
             f'rtspsrc location="{RTSP_BASE}" protocols=tcp latency=200 drop-on-latency=true ! '

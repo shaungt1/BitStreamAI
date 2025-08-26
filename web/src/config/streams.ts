@@ -4,7 +4,7 @@ export const defaultStreamSources: StreamSource[] = [
   {
     id: "edge01",
     label: "OR Camera 1", 
-    url: "http://192.168.7.166:8889/live/cam/whep",
+    url: "http://192.168.7.166:8889/live/det/whep",
     description: "Primary surgical monitoring camera with AI detection capabilities",
     type: "main",
     protocol: "webrtc",
@@ -15,7 +15,7 @@ export const defaultStreamSources: StreamSource[] = [
   {
     id: "edge02",
     label: "OR Camera 2",
-    url: "http://192.168.7.166:8890/live/cam/whep", 
+    url: "http://192.168.7.166:8890/live/det/whep", 
     description: "Secondary surgical monitoring camera for comprehensive coverage",
     type: "main",
     protocol: "webrtc",
