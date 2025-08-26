@@ -1,8 +1,10 @@
-# ---- torchvision + metadata shim (JetPack 4 safe)
+#!/usr/bin/env python3
+# edge.nano_yolo_ws.py
+
+# ===== torchvision + metadata shim (JetPack 4 safe)
 import sys, types, torch
 import importlib.metadata as im
 
-# 1) Fake a torchvision version so Ultralytics import stops crashing
 _real_version = im.version
 def _fake_version(name):
     if name == "torchvision":
@@ -10,7 +12,6 @@ def _fake_version(name):
     return _real_version(name)
 im.version = _fake_version
 
-# 2) Provide a minimal torchvision with ops.nms implemented in pure torch
 def _torch_nms_no_tv(boxes, scores, iou_thres):
     if boxes.numel() == 0:
         return boxes.new_zeros((0,), dtype=torch.long)
@@ -37,30 +38,64 @@ tv.__dict__["__version__"] = "0.13.1"
 ops = types.SimpleNamespace(nms=_torch_nms_no_tv)
 tv.__dict__["ops"] = ops
 sys.modules["torchvision"] = tv
-# ---- end shim
+# ===== end shim
 
-# ---- actual app
+# ===== app
 import os, cv2, time, json, asyncio, websockets
+
+try:
+    torch.set_num_threads(1)
+except Exception:
+    pass
+
 from ultralytics import YOLO
 
+# ---- CONFIG
 MODEL_PATH = os.path.expanduser("~/models/yolov8n.pt")
-RTSP_IN    = "rtsp://192.168.7.166:8554/live/cam?rtsp_transport=tcp"
-IMGSZ      = 256
-CONF       = 0.25
-TARGET_FPS = 2
+RTSP_IN    = "rtsp://192.168.7.166:8554/live/cam?rtsp_transport=tcp"  # edit if needed
 WS_PORT    = 8765
+
+# Conservative defaults for Nano 2GB
+IMGSZ        = 256
+CONF         = 0.25
+TARGET_FPS   = 2
+GST_LATENCY  = 200     # ms
+USE_HW_DEC   = True    # try Jetson nvv4l2decoder first, fallback to avdec_h264
 
 print(f"[init] loading model: {MODEL_PATH}")
 if not os.path.exists(MODEL_PATH):
     raise SystemExit(f"model not found: {MODEL_PATH}")
 model = YOLO(MODEL_PATH)
 
-print(f"[init] opening rtsp: {RTSP_IN}")
-cap = cv2.VideoCapture(RTSP_IN)
-if not cap.isOpened():
-    raise SystemExit(f"could not open RTSP: {RTSP_IN}")
+def make_gst_pipeline(rtsp_url: str, latency_ms: int, hw: bool) -> str:
+    head = f'rtspsrc location="{rtsp_url}" protocols=tcp latency={latency_ms} drop-on-latency=true ! rtph264depay ! h264parse ! '
+    if hw:
+        # HW decode → convert to BGR
+        body = (
+            "nvv4l2decoder ! nvvidconv ! video/x-raw,format=BGRx ! "
+            "videoconvert ! video/x-raw,format=BGR ! "
+            "appsink sync=false max-buffers=1 drop=true"
+        )
+    else:
+        # Software decode
+        body = "avdec_h264 ! videoconvert ! appsink sync=false max-buffers=1 drop=true"
+    return head + body
 
-last = 0.0
+def open_capture() -> cv2.VideoCapture:
+    print("[rtsp] opening GStreamer pipeline (HW decode)...") if USE_HW_DEC else None
+    gst = make_gst_pipeline(RTSP_IN, GST_LATENCY, hw=True if USE_HW_DEC else False)
+    cap = cv2.VideoCapture(gst, cv2.CAP_GSTREAMER)
+    if not cap.isOpened():
+        print("[rtsp] HW decode failed or unavailable, falling back to software...")
+        gst_sw = make_gst_pipeline(RTSP_IN, GST_LATENCY, hw=False)
+        cap = cv2.VideoCapture(gst_sw, cv2.CAP_GSTREAMER)
+    if not cap.isOpened():
+        raise SystemExit("could not open RTSP via GStreamer. Check gstreamer plugins and RTSP URL.")
+    print("[rtsp] capture opened")
+    return cap
+
+cap = open_capture()
+last_infer_ts = 0.0
 clients = set()
 
 async def ws_handler(ws, path):
@@ -76,20 +111,27 @@ async def ws_handler(ws, path):
         print(f"[ws] client disconnected ({len(clients)} total)")
 
 async def producer():
-    global last
+    global cap, last_infer_ts
     while True:
         ok, frame = cap.read()
         if not ok:
-            print("[rtsp] read failed, retrying in 0.5s...")
+            print("[rtsp] read failed, reopening in 0.5s...")
             await asyncio.sleep(0.5)
-            cap.open(RTSP_IN)
+            try:
+                cap.release()
+            except Exception:
+                pass
+            cap = open_capture()
             continue
+
         now = time.time()
-        if now - last < 1.0 / max(TARGET_FPS, 0.5):
+        if now - last_infer_ts < 1.0 / max(TARGET_FPS, 0.5):
+            # drop frames to maintain target infer FPS
             await asyncio.sleep(0)
             continue
-        last = now
+        last_infer_ts = now
 
+        # YOLO inference
         r = model.predict(frame, imgsz=IMGSZ, device="cpu", conf=CONF, verbose=False)[0]
         H, W = frame.shape[:2]
         dets = []
@@ -103,8 +145,9 @@ async def producer():
                     "x": float(x1/W), "y": float(y1/H),
                     "w": float((x2-x1)/W), "h": float((y2-y1)/H)
                 })
+
         msg = json.dumps({"t": time.time(), "dets": dets, "w": W, "h": H})
-        dead=[]
+        dead = []
         for ws in list(clients):
             try:
                 await ws.send(msg)
@@ -112,6 +155,7 @@ async def producer():
                 dead.append(ws)
         for ws in dead:
             clients.discard(ws)
+
         await asyncio.sleep(0)
 
 async def main():
