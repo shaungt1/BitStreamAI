@@ -1,116 +1,130 @@
-#!/usr/bin/env python3
-# YOLO → WebSocket JSON overlay server (no re-encode, lowest latency)
-# - RTSP input via OpenCV/FFmpeg (TCP, tiny buffer, auto-reconnect)
-# - Ultralytics YOLO on CPU
-# - Pure-PyTorch NMS shim so torchvision C++ ops are NOT required
-# - Sends normalized boxes over WS; browser draws overlay
-
-# ----- TorchVision shim (provide ops.nms without C++ extension)
+# ---- torchvision + metadata shim (JetPack 4 safe)
 import sys, types, torch
-def _nms_torch_only(boxes, scores, iou_thres):
-    # boxes: (N,4) xyxy; scores: (N,)
+import importlib.metadata as im
+
+# 1) Fake a torchvision version so Ultralytics import stops crashing
+_real_version = im.version
+def _fake_version(name):
+    if name == "torchvision":
+        return "0.13.1"
+    return _real_version(name)
+im.version = _fake_version
+
+# 2) Provide a minimal torchvision with ops.nms implemented in pure torch
+def _torch_nms_no_tv(boxes, scores, iou_thres):
     if boxes.numel() == 0:
         return boxes.new_zeros((0,), dtype=torch.long)
     scores, order = scores.sort(descending=True)
-    boxes = boxes[order]
-    keep = []
-    x1,y1,x2,y2 = boxes[:,0], boxes[:,1], boxes[:,2], boxes[:,3]
-    areas = (x2 - x1).clamp(min=0) * (y2 - y1).clamp(min=0)
+    x1,y1,x2,y2 = boxes[:,0],boxes[:,1],boxes[:,2],boxes[:,3]
+    areas = (x2-x1).clamp(min=0)*(y2-y1).clamp(min=0)
+    keep=[]
     while order.numel() > 0:
         i = order[0]
         keep.append(i)
-        if order.numel() == 1:
-            break
-        xx1 = torch.maximum(x1[order[1:]], x1[i])
-        yy1 = torch.maximum(y1[order[1:]], y1[i])
-        xx2 = torch.minimum(x2[order[1:]], x2[i])
-        yy2 = torch.minimum(y2[order[1:]], y2[i])
-        inter = (xx2 - xx1).clamp(min=0) * (yy2 - yy1).clamp(min=0)
-        iou = inter / (areas[i] + areas[order[1:]] - inter + 1e-6)
-        remain = torch.nonzero(iou <= iou_thres).squeeze(1) + 1
-        order = order[remain]
+        if order.numel() == 1: break
+        rest = order[1:]
+        xx1 = torch.maximum(x1[rest], x1[i])
+        yy1 = torch.maximum(y1[rest], y1[i])
+        xx2 = torch.minimum(x2[rest], x2[i])
+        yy2 = torch.minimum(y2[rest], y2[i])
+        inter = (xx2-xx1).clamp(min=0)*(yy2-yy1).clamp(min=0)
+        iou = inter / (areas[i] + areas[rest] - inter + 1e-6)
+        order = rest[torch.where(iou <= iou_thres)[0]]
     return torch.stack(keep) if keep else boxes.new_zeros((0,), dtype=torch.long)
 
-try:
-    import importlib.metadata as im
-    # Pretend a friendly torchvision version to silence compatibility warnings
-    try: tvv = im.version("torchvision")
-    except im.PackageNotFoundError: tvv = "0.19.0"
-    tv = types.ModuleType("torchvision"); tv.__version__ = tvv
-    class _Ops: pass
-    _ops = _Ops(); _ops.nms = _nms_torch_only
-    tv.ops = _ops
-    sys.modules["torchvision"] = tv
-except Exception:
-    pass
-# ----- end shim
+tv = types.ModuleType("torchvision")
+tv.__dict__["__version__"] = "0.13.1"
+ops = types.SimpleNamespace(nms=_torch_nms_no_tv)
+tv.__dict__["ops"] = ops
+sys.modules["torchvision"] = tv
+# ---- end shim
 
-import os, cv2, time, asyncio, json, numpy as np
+# ---- actual app
+import os, cv2, time, json, asyncio, websockets
 from ultralytics import YOLO
-import websockets
 
-# ---- config
-RTSP_IN = "rtsp://192.168.7.166:8554/live/cam?rtsp_transport=tcp"
-WS_HOST = "0.0.0.0"
-WS_PORT = 8765
+MODEL_PATH = os.path.expanduser("~/models/yolov8n.pt")
+RTSP_IN    = "rtsp://192.168.7.166:8554/live/cam?rtsp_transport=tcp"
+IMGSZ      = 256
+CONF       = 0.25
+TARGET_FPS = 2
+WS_PORT    = 8765
 
-IMGSZ = 320          # smaller = faster on CPU
-CONF  = 0.25
-TARGET_INFER_FPS = 3 # run YOLO ~3Hz; keep reading frames at camera rate to avoid lag
+print(f"[init] loading model: {MODEL_PATH}")
+if not os.path.exists(MODEL_PATH):
+    raise SystemExit(f"model not found: {MODEL_PATH}")
+model = YOLO(MODEL_PATH)
 
-MODEL = os.path.expanduser("~/models/yolov8n.pt")
-DEVICE = "cpu"       # your Torch has no CUDA visible right now
-
-# ---- model
-model = YOLO(MODEL)
-names = model.names
-
-# ---- capture with small buffer + auto-reconnect
-def open_cap():
-    cap = cv2.VideoCapture(RTSP_IN, cv2.CAP_FFMPEG)
-    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-    return cap
-
-cap = open_cap()
+print(f"[init] opening rtsp: {RTSP_IN}")
+cap = cv2.VideoCapture(RTSP_IN)
 if not cap.isOpened():
-    print(f"[ERR] cannot open {RTSP_IN} (is MediaMTX + /live/cam up?)")
+    raise SystemExit(f"could not open RTSP: {RTSP_IN}")
 
+last = 0.0
 clients = set()
 
+async def ws_handler(ws, path):
+    clients.add(ws)
+    print(f"[ws] client connected ({len(clients)} total)")
+    try:
+        while True:
+            await asyncio.sleep(1)
+    except Exception:
+        pass
+    finally:
+        clients.discard(ws)
+        print(f"[ws] client disconnected ({len(clients)} total)")
+
 async def producer():
-    global cap
-    last_infer = 0.0
-    bad_reads = 0
+    global last
     while True:
         ok, frame = cap.read()
         if not ok:
-            bad_reads += 1
-            if bad_reads >= 25:
-                # re-open input after ~25 failed grabs
-                try: cap.release()
-                except: pass
-                time.sleep(0.2)
-                cap = open_cap()
-                bad_reads = 0
-            await asyncio.sleep(0.02)
+            print("[rtsp] read failed, retrying in 0.5s...")
+            await asyncio.sleep(0.5)
+            cap.open(RTSP_IN)
             continue
-
-        bad_reads = 0
-        h, w = frame.shape[:2]
-
-        # throttle inference to avoid CPU backlog
         now = time.time()
-        if now - last_infer < (1.0 / max(TARGET_INFER_FPS, 0.5)):
-            await asyncio.sleep(0)  # yield to WS loop
+        if now - last < 1.0 / max(TARGET_FPS, 0.5):
+            await asyncio.sleep(0)
             continue
-        last_infer = now
+        last = now
 
-        # run YOLO
-        r = model.predict(
-            frame, imgsz=IMGSZ, device=DEVICE, conf=CONF, verbose=False
-        )[0]
+        r = model.predict(frame, imgsz=IMGSZ, device="cpu", conf=CONF, verbose=False)[0]
+        H, W = frame.shape[:2]
+        dets = []
+        if getattr(r, "boxes", None) is not None and len(r.boxes) > 0:
+            xyxy = r.boxes.xyxy.cpu().numpy()
+            cls  = r.boxes.cls.cpu().numpy().astype(int)
+            conf = r.boxes.conf.cpu().numpy()
+            for (x1,y1,x2,y2), c, p in zip(xyxy, cls, conf):
+                dets.append({
+                    "cls": int(c), "conf": float(p),
+                    "x": float(x1/W), "y": float(y1/H),
+                    "w": float((x2-x1)/W), "h": float((y2-y1)/H)
+                })
+        msg = json.dumps({"t": time.time(), "dets": dets, "w": W, "h": H})
+        dead=[]
+        for ws in list(clients):
+            try:
+                await ws.send(msg)
+            except Exception:
+                dead.append(ws)
+        for ws in dead:
+            clients.discard(ws)
+        await asyncio.sleep(0)
 
-        detections = []
-        if r.boxes is not None and len(r.boxes) > 0:
-            xyxy = r.boxes.xyxy.detach().cpu().numpy()
-            conf = r.boxes.conf.detach().cpu().numpy()
+async def main():
+    print(f"[ws] starting server on 0.0.0.0:{WS_PORT}")
+    server = await websockets.serve(ws_handler, "0.0.0.0", WS_PORT, ping_interval=20, ping_timeout=20)
+    try:
+        await producer()
+    finally:
+        server.close()
+        await server.wait_closed()
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        pass
