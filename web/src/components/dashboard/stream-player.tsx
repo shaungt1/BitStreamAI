@@ -15,7 +15,7 @@ interface StreamPlayerProps {
 }
 
 export function StreamPlayer({ 
-  streamUrl = "http://192.168.7.166:8889/live/cam/whep",
+  streamUrl = "http://192.168.7.166:8889/live/det/whep",
   className,
   title = "CSI Camera Stream"
 }: StreamPlayerProps) {
