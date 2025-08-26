@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# edge.nano_yolo_ws.py
+# edge.nano_yolo_ws.py — Python 3.8 venv friendly (no GStreamer required)
 
 # ===== torchvision + metadata shim (JetPack 4 safe)
 import sys, types, torch
@@ -20,14 +20,11 @@ def _torch_nms_no_tv(boxes, scores, iou_thres):
     areas = (x2-x1).clamp(min=0)*(y2-y1).clamp(min=0)
     keep=[]
     while order.numel() > 0:
-        i = order[0]
-        keep.append(i)
+        i = order[0]; keep.append(i)
         if order.numel() == 1: break
         rest = order[1:]
-        xx1 = torch.maximum(x1[rest], x1[i])
-        yy1 = torch.maximum(y1[rest], y1[i])
-        xx2 = torch.minimum(x2[rest], x2[i])
-        yy2 = torch.minimum(y2[rest], y2[i])
+        xx1 = torch.maximum(x1[rest], x1[i]); yy1 = torch.maximum(y1[rest], y1[i])
+        xx2 = torch.minimum(x2[rest], x2[i]); yy2 = torch.minimum(y2[rest], y2[i])
         inter = (xx2-xx1).clamp(min=0)*(yy2-yy1).clamp(min=0)
         iou = inter / (areas[i] + areas[rest] - inter + 1e-6)
         order = rest[torch.where(iou <= iou_thres)[0]]
@@ -44,85 +41,55 @@ sys.modules["torchvision"] = tv
 import os, cv2, time, json, asyncio, websockets
 from ultralytics import YOLO
 
-# ---- CONFIG (edit RTSP_IN if your path/port differs)
-MODEL_PATH = os.path.expanduser("~/models/yolov8n.pt")
-RTSP_IN    = "rtsp://192.168.7.166:8554/live/cam"  # NOTE: no ?rtsp_transport=tcp here
-WS_PORT    = 8765
-IMGSZ      = 256
-CONF       = 0.25
-TARGET_FPS = 2
-GST_LAT    = 200  # ms
-
 try:
     torch.set_num_threads(1)
 except Exception:
     pass
+
+# ---- CONFIG (edit RTSP_HOST if needed)
+MODEL_PATH = os.path.expanduser("~/models/yolov8n.pt")
+RTSP_BASE  = "rtsp://192.168.7.166:8554/live/cam"   # no query here
+RTSP_TCP   = RTSP_BASE + "?rtsp_transport=tcp"      # for FFmpeg/OpenCV fallback
+WS_PORT    = 8765
+
+# Conservative defaults for Nano 2GB + SW decode
+IMGSZ        = 256
+CONF         = 0.25
+TARGET_FPS   = 2
 
 print(f"[init] loading model: {MODEL_PATH}")
 if not os.path.exists(MODEL_PATH):
     raise SystemExit(f"model not found: {MODEL_PATH}")
 model = YOLO(MODEL_PATH)
 
-def gst_pipe_hw(rtsp:str)->str:
-    # HW decode path (Jetson): nvv4l2decoder
-    return (
-        f'rtspsrc location="{rtsp}" protocols=tcp latency={GST_LAT} drop-on-latency=true ! '
-        'rtph264depay ! h264parse ! '
-        'nvv4l2decoder ! nvvidconv ! video/x-raw,format=BGRx ! '
-        'videoconvert ! video/x-raw,format=BGR ! '
-        'appsink sync=false max-buffers=1 drop=true'
-    )
+def open_capture() -> cv2.VideoCapture:
+    # Prefer FFmpeg fallback inside venv (GStreamer often missing for 3.8 builds)
+    print(f"[rtsp] trying OpenCV/FFmpeg (TCP): {RTSP_TCP}")
+    cap = cv2.VideoCapture(RTSP_TCP)
+    if cap.isOpened():
+        print("[rtsp] capture opened via OpenCV/FFmpeg")
+        return cap
 
-def gst_pipe_decodebin(rtsp:str)->str:
-    # Auto-decoder (lets GStreamer pick available decoder)
-    return (
-        f'rtspsrc location="{rtsp}" protocols=tcp latency={GST_LAT} drop-on-latency=true ! '
-        'rtph264depay ! h264parse ! decodebin ! '
-        'videoconvert ! video/x-raw,format=BGR ! '
-        'appsink sync=false max-buffers=1 drop=true'
-    )
-
-def gst_pipe_sw(rtsp:str)->str:
-    # Software decode explicitly with avdec_h264
-    return (
-        f'rtspsrc location="{rtsp}" protocols=tcp latency={GST_LAT} drop-on-latency=true ! '
-        'rtph264depay ! h264parse ! '
-        'avdec_h264 ! videoconvert ! video/x-raw,format=BGR ! '
-        'appsink sync=false max-buffers=1 drop=true'
-    )
-
-def open_capture():
-    # Try multiple pipelines in order; print why it failed
-    tries = [
-        ("GStreamer HW (nvv4l2decoder)", gst_pipe_hw(RTSP_IN)),
-        ("GStreamer decodebin (auto)",   gst_pipe_decodebin(RTSP_IN)),
-        ("GStreamer SW (avdec_h264)",    gst_pipe_sw(RTSP_IN)),
-        ("OpenCV FFmpeg fallback",       None),
-    ]
-    # Check if OpenCV has GStreamer built-in
-    has_gst = "GStreamer" in cv2.getBuildInformation()
-
-    for name, pipe in tries:
-        if "GStreamer" in name and not has_gst:
-            print(f"[rtsp] skipping {name}: OpenCV GStreamer support not built")
-            continue
-        if pipe is None:
-            print(f"[rtsp] trying {name}: {RTSP_IN}")
-            cap = cv2.VideoCapture(RTSP_IN)  # FFmpeg fallback
-        else:
-            print(f"[rtsp] trying {name}")
-            cap = cv2.VideoCapture(pipe, cv2.CAP_GSTREAMER)
-
+    # If your OpenCV has GStreamer built (rare on venv 3.8), we try decodebin as a backup
+    if "GStreamer" in cv2.getBuildInformation():
+        gst = (
+            f'rtspsrc location="{RTSP_BASE}" protocols=tcp latency=200 drop-on-latency=true ! '
+            'rtph264depay ! h264parse ! decodebin ! '
+            'videoconvert ! video/x-raw,format=BGR ! '
+            'appsink sync=false max-buffers=1 drop=true'
+        )
+        print("[rtsp] OpenCV has GStreamer; trying GStreamer decodebin…")
+        cap = cv2.VideoCapture(gst, cv2.CAP_GSTREAMER)
         if cap.isOpened():
-            print(f"[rtsp] capture opened via {name}")
+            print("[rtsp] capture opened via GStreamer decodebin")
             return cap
         else:
-            print(f"[rtsp] {name} failed")
+            print("[rtsp] GStreamer decodebin failed")
 
-    raise SystemExit("could not open RTSP with any method. Check plugins and RTSP URL.")
+    raise SystemExit("could not open RTSP (FFmpeg TCP and GStreamer both failed). Check URL and camera/MediaMTX.")
 
 cap = open_capture()
-last_infer = 0.0
+last_infer_ts = 0.0
 clients = set()
 
 async def ws_handler(ws, path):
@@ -138,24 +105,22 @@ async def ws_handler(ws, path):
         print(f"[ws] client disconnected ({len(clients)} total)")
 
 async def producer():
-    global cap, last_infer
+    global cap, last_infer_ts
     while True:
         ok, frame = cap.read()
         if not ok:
             print("[rtsp] read failed, reopening in 0.5s…")
             await asyncio.sleep(0.5)
-            try:
-                cap.release()
-            except Exception:
-                pass
+            try: cap.release()
+            except Exception: pass
             cap = open_capture()
             continue
 
         now = time.time()
-        if now - last_infer < 1.0 / max(TARGET_FPS, 0.5):
+        if now - last_infer_ts < 1.0 / max(TARGET_FPS, 0.5):
             await asyncio.sleep(0)
             continue
-        last_infer = now
+        last_infer_ts = now
 
         r = model.predict(frame, imgsz=IMGSZ, device="cpu", conf=CONF, verbose=False)[0]
         H, W = frame.shape[:2]
@@ -170,6 +135,7 @@ async def producer():
                     "x": float(x1/W), "y": float(y1/H),
                     "w": float((x2-x1)/W), "h": float((y2-y1)/H)
                 })
+
         msg = json.dumps({"t": time.time(), "dets": dets, "w": W, "h": H})
 
         dead=[]
@@ -180,6 +146,7 @@ async def producer():
                 dead.append(ws)
         for ws in dead:
             clients.discard(ws)
+
         await asyncio.sleep(0)
 
 async def main():
@@ -196,5 +163,4 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         pass
-    except Exception as e:
-        print("FATAL:", e)
+    print("exiting")
