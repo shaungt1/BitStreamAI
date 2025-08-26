@@ -1,163 +1,118 @@
-# ---- TorchVision shim with built-in NMS (no torchvision.ops needed)
-import sys, types
-import torch
+# --- minimal torchvision shim so Ultralytics won't use torchvision.ops.nms
+import sys, types, torch
 def _torch_nms_no_tv(boxes, scores, iou_thres):
-    if boxes.numel() == 0:
-        return boxes.new_zeros((0,), dtype=torch.long)
-    scores, order = scores.sort(descending=True)
-    boxes = boxes[order]
-    keep = []
-    x1, y1, x2, y2 = boxes[:,0], boxes[:,1], boxes[:,2], boxes[:,3]
-    areas = (x2 - x1).clamp(min=0) * (y2 - y1).clamp(min=0)
-    while order.numel() > 0:
-        i = order[0]; keep.append(i)
-        if order.numel() == 1: break
-        xx1 = x1[order[1:]].clamp(min=float(x1[i]))
-        yy1 = y1[order[1:]].clamp(min=float(y1[i]))
-        xx2 = x2[order[1:]].clamp(max=float(x2[i]))
-        yy2 = y2[order[1:]].clamp(max=float(y2[i]))
-        inter = (xx2 - xx1).clamp(min=0) * (yy2 - yy1).clamp(min=0)
-        iou = inter / (areas[i] + areas[order[1:]] - inter + 1e-6)
-        order = order[torch.where(iou <= iou_thres)[0] + 1]
+    if boxes.numel() == 0: return boxes.new_zeros((0,), dtype=torch.long)
+    scores, order = scores.sort(descending=True); boxes = boxes[order]
+    keep=[]; x1,y1,x2,y2 = boxes[:,0],boxes[:,1],boxes[:,2],boxes[:,3]
+    areas=(x2-x1).clamp(min=0)*(y2-y1).clamp(min=0)
+    while order.numel()>0:
+        i=order[0]; keep.append(i)
+        if order.numel()==1: break
+        xx1=x1[order[1:]].clamp(min=float(x1[i]))
+        yy1=y1[order[1:]].clamp(min=float(y1[i]))
+        xx2=x2[order[1:]].clamp(max=float(x2[i]))
+        yy2=y2[order[1:]].clamp(max=float(y2[i]))
+        inter=(xx2-xx1).clamp(min=0)*(yy2-yy1).clamp(min=0)
+        iou=inter/(areas[i]+areas[order[1:]]-inter+1e-6)
+        order=order[torch.where(iou<=iou_thres)[0]+1]
     return torch.stack(keep) if len(keep) else boxes.new_zeros((0,), dtype=torch.long)
-
 try:
     import importlib.metadata as im
-    try: tv_version = im.version("torchvision")
-    except im.PackageNotFoundError: tv_version = "0.13.1"
-    tv = types.ModuleType("torchvision"); tv.__version__ = tv_version
+    try: tvv = im.version("torchvision")
+    except im.PackageNotFoundError: tvv = "0.13.1"
+    tv = types.ModuleType("torchvision"); tv.__version__ = tvv
     class _Ops: pass
-    _ops = _Ops(); _ops.nms = _torch_nms_no_tv
-    tv.ops = _ops
-    sys.modules["torchvision"] = tv
-except Exception:
-    pass
-# ---- end shim
+    _ops=_Ops(); _ops.nms=_torch_nms_no_tv
+    tv.ops=_ops; sys.modules["torchvision"]=tv
+except Exception: pass
+# --- end shim
 
-import os, time, subprocess as sp
-import cv2, numpy as np
+import os, time, cv2, numpy as np, subprocess as sp
 from ultralytics import YOLO
 
-# INPUT: your MediaMTX camera stream
-RTSP_IN  = "rtsp://192.168.7.166:8554/live/cam?rtsp_transport=tcp"
-# OUTPUT: annotated stream back to MediaMTX over RTSP
+# URLs
+RTSP_IN  = "rtsp://192.168.7.166:8554/live/cam"   # we force TCP in GST pipeline
 RTSP_OUT = "rtsp://192.168.7.166:8554/live/det"
 
-# Lighter settings for Nano CPU
+# Light settings (Nano CPU infer)
 IMGSZ = 320
 OUT_W, OUT_H = 480, 270
 FPS = 10
 CONF_THRES = 0.25
-BITRATE = "800k"  # target bitrate
+BITRATE = 800_000  # bps
 
 MODEL_PATH = os.path.expanduser("~/models/yolov8n.pt")
-DEVICE = "cpu"  # force CPU; switch to "cuda:0" after you fix Torch CUDA
+DEVICE = "cpu"
 
-print("Loading model on", DEVICE)
-model = YOLO(MODEL_PATH)
+# ---- GStreamer pipelines (HW decode + HW encode, low-latency)
+GST_IN = (
+    f"rtspsrc location={RTSP_IN} protocols=tcp latency=0 ! "
+    "rtph264depay ! h264parse ! "
+    "nvv4l2decoder disable-dpb=true ! "  # HW decode, low-latency
+    "nvvidconv ! video/x-raw,format=BGRx ! "
+    "videoconvert ! video/x-raw,format=BGR ! "
+    "appsink drop=true max-buffers=1 sync=false"
+)
 
-def open_input():
-    cap = cv2.VideoCapture(RTSP_IN, cv2.CAP_FFMPEG)
-    return cap
+GST_OUT = (
+    f"appsrc is-live=true block=true format=time do-timestamp=true "
+    f"caps=video/x-raw,format=BGR,width={OUT_W},height={OUT_H},framerate={FPS}/1 ! "
+    "videoconvert ! video/x-raw,format=NV12 ! "
+    "nvvidconv ! video/x-raw(memory:NVMM),format=NV12 ! "
+    f"nvv4l2h264enc maxperf-enable=1 insert-sps-pps=true iframeinterval={FPS} "
+    f"control-rate=1 preset-level=1 bitrate={BITRATE} ! "
+    "h264parse config-interval=1 ! "
+    f"rtspclientsink location={RTSP_OUT} protocols=tcp latency=0"
+)
 
-def start_ffmpeg():
-    cmd = [
-        "ffmpeg",
-        "-loglevel","error",
-        "-re",
-        "-f","rawvideo",
-        "-pix_fmt","bgr24",
-        "-s", f"{OUT_W}x{OUT_H}",
-        "-r", str(FPS),
-        "-i","-",
-        "-vf","format=yuv420p",
-        "-c:v","libx264",
-        "-preset","ultrafast",
-        "-tune","zerolatency",
-        "-b:v", BITRATE,
-        "-maxrate", BITRATE,
-        "-bufsize","1M",
-        "-g", str(FPS*2),
-        "-f","rtsp",
-        "-rtsp_transport","tcp",
-        "-muxdelay","0.1",
-        "-muxpreload","0",
-        RTSP_OUT
-    ]
-    return sp.Popen(cmd, stdin=sp.PIPE)
-
-cap = open_input()
+# ---- Open devices
+cap = cv2.VideoCapture(GST_IN, cv2.CAP_GSTREAMER)
 if not cap.isOpened():
-    print("ERROR: failed to open input", RTSP_IN); sys.exit(1)
+    print("ERROR: failed to open input via GStreamer"); raise SystemExit(1)
 
-ffmpeg = start_ffmpeg()
+writer = cv2.VideoWriter(GST_OUT, cv2.CAP_GSTREAMER, 0, float(FPS), (OUT_W, OUT_H))
+if not writer.isOpened():
+    print("ERROR: failed to open RTSP writer via GStreamer"); raise SystemExit(1)
+
+model = YOLO(MODEL_PATH)
 names = model.names
 
 def draw_boxes(frame, boxes, scores, classes):
     for (x1,y1,x2,y2), s, c in zip(boxes, scores, classes):
         x1,y1,x2,y2 = map(int,[x1,y1,x2,y2])
         cv2.rectangle(frame,(x1,y1),(x2,y2),(0,255,0),2)
-        label = f"{names[int(c)]} {float(s):.2f}"
+        label=f"{names[int(c)]} {float(s):.2f}"
         cv2.putText(frame,label,(x1,max(y1-5,10)),cv2.FONT_HERSHEY_SIMPLEX,0.5,(10,10,10),2,cv2.LINE_AA)
         cv2.putText(frame,label,(x1,max(y1-5,10)),cv2.FONT_HERSHEY_SIMPLEX,0.5,(240,240,240),1,cv2.LINE_AA)
     return frame
 
 print("Running… Ctrl+C to stop.")
-frame_interval = 1.0 / FPS
-last_t = 0.0
-bad_reads = 0
-
+interval = 1.0/FPS; t0 = 0.0
 try:
     while True:
         ok, frame = cap.read()
         if not ok:
-            bad_reads += 1
-            time.sleep(0.1)
-            if bad_reads > 30:  # ~3 seconds of failures -> reopen input
-                print("Reopening input…")
-                cap.release()
-                time.sleep(0.5)
-                cap = open_input()
-                bad_reads = 0
+            time.sleep(0.02)  # brief backoff, appsink drops late frames
             continue
-        bad_reads = 0
 
         frame = cv2.resize(frame, (OUT_W, OUT_H), interpolation=cv2.INTER_LINEAR)
 
-        results = model.predict(frame, imgsz=IMGSZ, device=DEVICE, conf=CONF_THRES, verbose=False)
-        r = results[0]
-        if r.boxes is not None and len(r.boxes) > 0:
-            xyxy = r.boxes.xyxy.detach().cpu().numpy()
-            conf = r.boxes.conf.detach().cpu().numpy()
-            cls  = r.boxes.cls.detach().cpu().numpy()
+        res = model.predict(frame, imgsz=IMGSZ, device=DEVICE, conf=CONF_THRES, verbose=False)[0]
+        if res.boxes is not None and len(res.boxes) > 0:
+            xyxy = res.boxes.xyxy.detach().cpu().numpy()
+            conf = res.boxes.conf.detach().cpu().numpy()
+            cls  = res.boxes.cls.detach().cpu().numpy()
             frame = draw_boxes(frame, xyxy, conf, cls)
 
-        # keep output rate steady
+        writer.write(frame)  # pushes into HW encoder
+
         now = time.time()
-        sleep = frame_interval - (now - last_t)
-        if sleep > 0: time.sleep(sleep)
-        last_t = time.time()
-
-        # respawn ffmpeg if it died
-        if ffmpeg.poll() is not None:
-            print("FFmpeg exited; restarting publisher…")
-            ffmpeg = start_ffmpeg()
-
-        try:
-            ffmpeg.stdin.write(frame.tobytes())
-        except BrokenPipeError:
-            print("FFmpeg stdin BrokenPipe; restarting publisher…")
-            try: ffmpeg.stdin.close()
-            except Exception: pass
-            ffmpeg.wait(timeout=1)
-            ffmpeg = start_ffmpeg()
-
+        slp = interval - (now - t0)
+        if slp > 0: time.sleep(slp)
+        t0 = time.time()
 except KeyboardInterrupt:
     pass
 finally:
     cap.release()
-    try: ffmpeg.stdin.close()
-    except Exception: pass
-    try: ffmpeg.wait(timeout=2)
-    except Exception: pass
+    writer.release()
     print("Stopped.")
