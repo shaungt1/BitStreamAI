@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-# nano_yolo_ws.py — Python 3.8 venv friendly (no GStreamer required)
+# nano_yolo_ws.py — JetPack 4 + Python 3.8 venv, no GStreamer required
+# Reads RTMP first (local), falls back to RTSP/TCP if needed. Tiny buffers. YOLOv8n CPU.
 
-# ===== torchvision + metadata shim (JetPack 4 safe)
+# ===== torchvision + metadata shim (avoid C++ ops requirement)
 import sys, types, torch
 import importlib.metadata as im
-
 _real_version = im.version
 def _fake_version(name):
-    if name == "torchvision":
-        return "0.13.1"
+    if name == "torchvision": return "0.13.1"
     return _real_version(name)
 im.version = _fake_version
 
@@ -19,21 +18,20 @@ def _torch_nms_no_tv(boxes, scores, iou_thres):
     x1,y1,x2,y2 = boxes[:,0],boxes[:,1],boxes[:,2],boxes[:,3]
     areas = (x2-x1).clamp(min=0)*(y2-y1).clamp(min=0)
     keep=[]
-    while order.numel() > 0:
-        i = order[0]; keep.append(i)
-        if order.numel() == 1: break
-        rest = order[1:]
-        xx1 = torch.maximum(x1[rest], x1[i]); yy1 = torch.maximum(y1[rest], y1[i])
-        xx2 = torch.minimum(x2[rest], x2[i]); yy2 = torch.minimum(y2[rest], y2[i])
-        inter = (xx2-xx1).clamp(min=0)*(yy2-yy1).clamp(min=0)
-        iou = inter / (areas[i] + areas[rest] - inter + 1e-6)
-        order = rest[torch.where(iou <= iou_thres)[0]]
+    while order.numel()>0:
+        i=order[0]; keep.append(i)
+        if order.numel()==1: break
+        rest=order[1:]
+        xx1=torch.maximum(x1[rest],x1[i]); yy1=torch.maximum(y1[rest],y1[i])
+        xx2=torch.minimum(x2[rest],x2[i]); yy2=torch.minimum(y2[rest],y2[i])
+        inter=(xx2-xx1).clamp(min=0)*(yy2-yy1).clamp(min=0)
+        iou=inter/(areas[i]+areas[rest]-inter+1e-6)
+        order=rest[torch.where(iou<=iou_thres)[0]]
     return torch.stack(keep) if keep else boxes.new_zeros((0,), dtype=torch.long)
 
 tv = types.ModuleType("torchvision")
-tv.__dict__["__version__"] = "0.13.1"
-ops = types.SimpleNamespace(nms=_torch_nms_no_tv)
-tv.__dict__["ops"] = ops
+tv.__version__ = "0.13.1"
+tv.ops = types.SimpleNamespace(nms=_torch_nms_no_tv)
 sys.modules["torchvision"] = tv
 # ===== end shim
 
@@ -41,23 +39,17 @@ sys.modules["torchvision"] = tv
 import os, cv2, time, json, asyncio, websockets
 from ultralytics import YOLO
 
-try:
-    torch.set_num_threads(1)
-except Exception:
-    pass
+try: torch.set_num_threads(1)
+except Exception: pass
 
-# ---- CONFIG (edit RTSP_HOST if needed)
+# ---- CONFIG (edit host if needed)
 MODEL_PATH = os.path.expanduser("~/models/yolov8n.pt")
-RTSP_BASE  = "rtsp://192.168.7.166:8554/live/cam"   # no query here
-RTSP_TCP   = RTSP_BASE + "?rtsp_transport=tcp"      # force TCP for OpenCV/FFmpeg
+RTMP_URL   = "rtmp://127.0.0.1:1935/live/cam?live=1"
+RTSP_LOCAL = "rtsp://127.0.0.1:8554/live/cam"
+RTSP_LAN   = "rtsp://192.168.7.166:8554/live/cam"
 WS_PORT    = 8765
 
-# Conservative defaults for Nano 2GB + SW decode
-IMGSZ        = 256
-CONF         = 0.25
-TARGET_FPS   = 2
-
-# Force FFmpeg/RTSP over TCP + minimal buffering for OpenCV in venv
+# Force TCP + tiny/no buffers for FFmpeg (OpenCV backend)
 os.environ.setdefault(
     "OPENCV_FFMPEG_CAPTURE_OPTIONS",
     "rtsp_transport;tcp|max_delay;0|buffer_size;102400|stimeout;2000000|"
@@ -65,45 +57,45 @@ os.environ.setdefault(
     "reorder_queue_size;0|fpsprobesize;0"
 )
 
+# YOLO knobs for Nano 2GB
+IMGSZ=256
+CONF=0.25
+TARGET_FPS=2
+
 print(f"[init] loading model: {MODEL_PATH}")
 if not os.path.exists(MODEL_PATH):
     raise SystemExit(f"model not found: {MODEL_PATH}")
 model = YOLO(MODEL_PATH)
 
-def open_capture() -> cv2.VideoCapture:
-    # Prefer FFmpeg fallback inside venv (GStreamer often missing for 3.8 builds)
-    print(f"[rtsp] trying OpenCV/FFmpeg (TCP): {RTSP_TCP}")
-    cap = cv2.VideoCapture(RTSP_TCP)
+def _open_ffmpeg(url: str) -> cv2.VideoCapture:
+    print(f"[src] trying OpenCV/FFmpeg: {url}")
+    cap = cv2.VideoCapture(url)
     if cap.isOpened():
-        # keep only one buffer so late frames are dropped, not queued
-        try:
-            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-        except Exception:
-            pass
-        print("[rtsp] capture opened via OpenCV/FFmpeg")
+        try: cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        except Exception: pass
+        print("[src] opened")
         return cap
+    print("[src] failed")
+    return None
 
-    # Optional: if OpenCV has GStreamer compiled in this venv, try decodebin
-    if "GStreamer" in cv2.getBuildInformation():
-        gst = (
-            f'rtspsrc location="{RTSP_BASE}" protocols=tcp latency=200 drop-on-latency=true ! '
-            'rtph264depay ! h264parse ! decodebin ! '
-            'videoconvert ! video/x-raw,format=BGR ! '
-            'appsink sync=false max-buffers=1 drop=true'
-        )
-        print("[rtsp] OpenCV has GStreamer; trying GStreamer decodebin…")
-        cap = cv2.VideoCapture(gst, cv2.CAP_GSTREAMER)
-        if cap.isOpened():
-            print("[rtsp] capture opened via GStreamer decodebin")
-            return cap
-        else:
-            print("[rtsp] GStreamer decodebin failed")
+def open_capture() -> cv2.VideoCapture:
+    # 1) Prefer the ORIGINAL RTMP you publish (bypasses the RTSP repack corruption)
+    cap = _open_ffmpeg(RTMP_URL)
+    if cap: return cap
 
-    raise SystemExit("could not open RTSP (FFmpeg TCP and GStreamer both failed). Check URL and camera/MediaMTX.")
+    # 2) Fallback to RTSP on localhost, forced TCP
+    cap = _open_ffmpeg(RTSP_LOCAL + "?rtsp_transport=tcp")
+    if cap: return cap
+
+    # 3) Fallback to RTSP on LAN IP, forced TCP
+    cap = _open_ffmpeg(RTSP_LAN + "?rtsp_transport=tcp")
+    if cap: return cap
+
+    raise SystemExit("No video source opened (RTMP and RTSP/TCP all failed). Check publisher and MediaMTX.")
 
 cap = open_capture()
-last_infer_ts = 0.0
-clients = set()
+last_infer = 0.0
+clients=set()
 
 async def ws_handler(ws, path):
     clients.add(ws)
@@ -118,11 +110,11 @@ async def ws_handler(ws, path):
         print(f"[ws] client disconnected ({len(clients)} total)")
 
 async def producer():
-    global cap, last_infer_ts
+    global cap, last_infer
     while True:
         ok, frame = cap.read()
         if not ok:
-            print("[rtsp] read failed, reopening in 0.5s…")
+            print("[src] read failed, reopening in 0.5s…")
             await asyncio.sleep(0.5)
             try: cap.release()
             except Exception: pass
@@ -130,10 +122,10 @@ async def producer():
             continue
 
         now = time.time()
-        if now - last_infer_ts < 1.0 / max(TARGET_FPS, 0.5):
+        if now - last_infer < 1.0 / max(TARGET_FPS, 0.5):
             await asyncio.sleep(0)
             continue
-        last_infer_ts = now
+        last_infer = now
 
         r = model.predict(frame, imgsz=IMGSZ, device="cpu", conf=CONF, verbose=False)[0]
         H, W = frame.shape[:2]
@@ -150,30 +142,21 @@ async def producer():
                 })
 
         msg = json.dumps({"t": time.time(), "dets": dets, "w": W, "h": H})
-
         dead=[]
         for ws in list(clients):
-            try:
-                await ws.send(msg)
-            except Exception:
-                dead.append(ws)
-        for ws in dead:
-            clients.discard(ws)
-
+            try:    await ws.send(msg)
+            except Exception: dead.append(ws)
+        for ws in dead: clients.discard(ws)
         await asyncio.sleep(0)
 
 async def main():
     print(f"[ws] starting server on 0.0.0.0:{WS_PORT}")
     server = await websockets.serve(ws_handler, "0.0.0.0", WS_PORT, ping_interval=20, ping_timeout=20)
-    try:
-        await producer()
+    try:    await producer()
     finally:
-        server.close()
-        await server.wait_closed()
+        server.close(); await server.wait_closed()
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        pass
+    try: asyncio.run(main())
+    except KeyboardInterrupt: pass
     print("exiting")
